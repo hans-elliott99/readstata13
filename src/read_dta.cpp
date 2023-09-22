@@ -14,6 +14,8 @@
  * You should have received a copy of the GNU General Public License along
  * with this program. If not, see <http://www.gnu.org/licenses/>.
  */
+#define USESTRLFIX 1
+#include <chrono> // just for profiling
 
 #include "readstata.h"
 #include "read_data.h"
@@ -25,6 +27,7 @@ List read_dta(FILE * file, const bool missing, const IntegerVector selectrows,
               const CharacterVector selectcols,
               const bool strlexport, const CharacterVector strlpath)
 {
+  Rprintf("USESTRLFIX = %i\n", USESTRLFIX);
   // stata_dta><header>
   test("stata_dta><header>", file);
   test("<release>", file);
@@ -228,12 +231,15 @@ List read_dta(FILE * file, const bool missing, const IntegerVector selectrows,
   */
 
   IntegerVector vartype(k);
+  uint32_t nstrl = 0;
   for (uint32_t i=0; i<k; ++i)
   {
     uint16_t nvartype = 0;
     nvartype = readbin(nvartype, file, swapit);
     vartype[i] = nvartype;
+    if (nvartype == STATA_STRL) nstrl++;
   }
+  Rprintf("%i strLs detected\n", nstrl);
 
   //</variable_types>
   test("</variable_types>", file);
@@ -484,6 +490,7 @@ List read_dta(FILE * file, const bool missing, const IntegerVector selectrows,
   * len:   length of the strL.
   * strl:  long string.
   */
+  Rprintf("reading long strings...\n");
 
   std::string gso = "GSO";
 
@@ -491,9 +498,19 @@ List read_dta(FILE * file, const bool missing, const IntegerVector selectrows,
   readstring(tags, file, tags.size());
 
   //put strLs into a named vector
+#if USESTRLFIX
+  CharacterVector strlvalues(nstrl * n);
+  CharacterVector strlnames(nstrl * n);
+#else
   CharacterVector strlvalues(0);
   CharacterVector strlnames(0);
+#endif
 
+  // for profiling
+  std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+  std::chrono::steady_clock::time_point t1;
+
+  uint64_t i = 0;
   while (gso.compare(tags)==0)
   {
     CharacterVector strls(2);
@@ -562,10 +579,26 @@ List read_dta(FILE * file, const bool missing, const IntegerVector selectrows,
 
     }
 
+#if USESTRLFIX
+    strlvalues[i] = strl;
+    strlnames[i] = ref;
+#else
     strlvalues.push_back( strl );
     strlnames.push_back( ref );
+#endif
 
     readstring(tags, file, tags.size());
+
+    if (i % 10000 == 0) {
+      t1 = std::chrono::steady_clock::now();
+      Rprintf("%i: %i secs (vec len = %i)\n",
+              i,
+              std::chrono::duration_cast<std::chrono::seconds>(t1 - t0).count(),
+              strlvalues.size());
+      t0 = std::chrono::steady_clock::now();
+    }
+    
+   i++; 
   }
 
   // set identifier as name
@@ -576,6 +609,7 @@ List read_dta(FILE * file, const bool missing, const IntegerVector selectrows,
   test("trls>", file);
   test("<value_labels>", file);
 
+  Rprintf("done!\n");
   /*
   * labels are separated by <lbl>-tags. Labels may appear in any order e.g.
   * 2 "female" 1 "male 9 "missing". They are stored as tables.
